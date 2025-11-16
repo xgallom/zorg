@@ -29,16 +29,16 @@ pub const std_options: std.Options = .{
     .log_scope_levels = &.{
         // .{ .scope = .alloc, .level = .debug },
         // .{ .scope = .engine, .level = .debug },
-        // .{ .scope = .gfx_mesh, .level = .debug },
         // .{ .scope = .gfx_obj_loader, .level = .debug },
+        // .{ .scope = .gfx_mesh, .level = .debug },
         // .{ .scope = .gfx_renderer, .level = .debug },
         // .{ .scope = .gfx_shader, .level = .debug },
         // .{ .scope = .gfx_shader_loader, .level = .debug },
+        .{ .scope = .gfx_scene_node, .level = .debug },
         // .{ .scope = .gfx_loader, .level = .debug },
         // .{ .scope = .key_tree, .level = .debug },
         // .{ .scope = .radix_tree, .level = .debug },
         // .{ .scope = .scheduler, .level = .debug },
-        // .{ .scope = .gfx_shader_loader, .level = .debug },
         // .{ .scope = .tree, .level = .debug },
         // .{ .scope = .scene, .level = .debug },
     },
@@ -56,11 +56,11 @@ pub const zengine_options: zengine.Options = .{
 
 const Config = struct {
     mouse_speed: f32 = 0.25,
-    speed_scale: f32 = 1,
+    speed_scale: f32 = 15,
     flags: packed struct {
-        mouse_captured: bool = true,
+        mouse_captured: bool = false,
         mouse_y_inverted: bool = true,
-        camera_controls: CameraControlsType = .y_up,
+        camera_controls: CameraControlsType = .y_dynamic,
     } = .{},
 
     pub const CameraControlsType = enum(u1) {
@@ -73,13 +73,38 @@ const Config = struct {
     }
 };
 
+const RenderPasses = struct {
+    bloom: gfx.pass.Bloom = .{
+        .intensity = 0.25,
+    },
+
+    pub fn propertyEditor(self: *RenderPasses) ui.Element {
+        return ui.PropertyEditor(RenderPasses).init(self).element();
+    }
+
+    pub fn propertyEditorNode(
+        self: *RenderPasses,
+        editor: *ui.PropertyEditorWindow,
+        parent: *ui.PropertyEditorWindow.Item,
+    ) !*ui.PropertyEditorWindow.Item {
+        return editor.appendChild(
+            parent,
+            self.propertyEditor(),
+            @typeName(RenderPasses),
+            "Render Passes",
+        );
+    }
+};
+
 var config: Config = .{};
 
 var gfx_loader: gfx.Loader = undefined;
+var gfx_passes: RenderPasses = .{};
 var flat_scene: Scene.Flattened = undefined;
 var scene_map: zengine.containers.ArrayMap(Scene.Node.Id) = .empty;
 
-var controls = zengine.controls.CameraControls{};
+var controls: zengine.controls.CameraControls = .init;
+var firing_timer: zengine.time.StaticTimer(200) = .init;
 var debug_ui: zengine.ui.DebugUI = undefined;
 var property_editor: ui.PropertyEditorWindow = undefined;
 var allocs_window: zengine.ui.AllocsWindow = undefined;
@@ -88,6 +113,10 @@ var log_window: zengine.ui.LogWindow = .invalid;
 
 var mouse_motion: math.Point_f32 = math.point_f32.zero;
 var execute_raycast: bool = false;
+
+pub const Controls = struct {
+    pub const firing = 16;
+};
 
 const rnd = struct {
     var r: std.Random.DefaultPrng = undefined;
@@ -160,22 +189,31 @@ fn load(self: *const Zengine) !bool {
     {
         errdefer gfx_loader.cancel();
 
+        _ = try gfx_loader.loadMesh("background.obj");
+        _ = try gfx_loader.loadMesh("gas_giant.obj");
+        _ = try gfx_loader.loadMesh("ship.obj");
+        _ = try gfx_loader.loadMesh("small_enemy_ship.obj");
+        _ = try gfx_loader.loadMesh("bullet.obj");
+
+        try gfx_loader.createGraphicsPipelines();
         _ = try gfx_loader.createOriginMesh();
         _ = try gfx_loader.createDefaultMaterial();
         _ = try gfx_loader.createTestingMaterial();
         _ = try gfx_loader.createDefaultTexture();
 
+        try gfx.pass.Bloom.init(&gfx_loader);
+
         {
-            var camera_position: math.Vector3 = .{ 4, 8, 10 };
+            var camera_position: math.Vector3 = .{ 0, 400, 0 };
             var camera_direction: math.Vector3 = undefined;
 
-            math.vector3.scale(&camera_position, 0.5);
             math.vector3.lookAt(&camera_direction, &camera_position, &math.vector3.zero);
 
             _ = try self.renderer.insertCamera("default", &.{
                 .type = .perspective,
                 .position = camera_position,
                 .direction = camera_direction,
+                .up = .{ 0, 0, 1 },
             });
         }
 
@@ -188,7 +226,55 @@ fn load(self: *const Zengine) !bool {
     Zengine.sections.sub(.load).sub(.gfx).end();
     Zengine.sections.sub(.load).sub(.scene).begin();
 
+    const pi = std.math.pi;
+
+    const env = try self.scene.createRootNode("Environment", .node(), &.{});
+    _ = try self.scene.createChildNode(env, "Background", .object("Background"), &.{
+        .translation = .{ 0, -9000, 0 },
+        .rotation = .{ -pi / 2.0, 0, 0 },
+        .scale = .{ 7850, 4350, 1 },
+    });
+    {
+        const container = try self.scene.createChildNode(env, "Planet", .node(), &.{
+            .translation = .{ -500, -1000, 350 },
+            .rotation = .{ 1.35, 0.3, 0 },
+        });
+        const planet = try self.scene.createChildNode(container, "Planet", .node(), &.{
+            .scale = .{ 100, 100, 100 },
+        });
+        _ = try self.scene.createChildNode(planet, "Planet", .object("Gas_Giant"), &.{});
+        _ = try self.scene.createChildNode(planet, "Ring", .object("Gas_Giant_Ring"), &.{});
+
+        try scene_map.insert(self.scene.allocator, "planet", planet);
+    }
+
     _ = try self.scene.createRootNode("Ambient Light", .light("Ambient"), &.{});
+    _ = try self.scene.createRootNode("Directional Light", .light("Directional"), &.{});
+    _ = try self.scene.createRootNode("Directional Light", .light("Directional 2"), &.{
+        .rotation = .{ pi / 6.0, pi, 0 },
+    });
+    _ = try self.scene.createRootNode("Directional Light", .light("Directional 2"), &.{
+        .rotation = .{ -pi / 2.0, pi * 2.0 / 3.0, 0 },
+    });
+
+    const enemy_ship = try self.scene.createRootNode("Enemy Ship", .node(), &.{
+        .translation = .{ 0, 0, 30 },
+    });
+
+    _ = try self.scene.createChildNode(enemy_ship, "Wireframe", .object("Small_Enemy_Ship_Wireframe"), &.{});
+    _ = try self.scene.createChildNode(enemy_ship, "Hull", .object("Small_Enemy_Ship_Hull"), &.{});
+
+    const ship = try self.scene.createRootNode("Ship", .node(), &.{
+        .scale = .{ 7.5, 7.5, 7.5 },
+    });
+    try scene_map.insert(self.scene.allocator, "ship", ship);
+
+    _ = try self.scene.createChildNode(ship, "Wireframe", .object("Ship_Wireframe"), &.{});
+    _ = try self.scene.createChildNode(ship, "Hull", .object("Ship_Hull"), &.{});
+
+    const bullets = try self.scene.createRootNode("Bullets", .node(), &.{});
+    try scene_map.insert(self.scene.allocator, "bullets", bullets);
+
     Zengine.sections.sub(.load).sub(.scene).end();
     Zengine.sections.sub(.load).sub(.ui).begin();
 
@@ -201,10 +287,12 @@ fn load(self: *const Zengine) !bool {
     _ = try self.renderer.propertyEditorNode(&property_editor, gfx_node);
     _ = try gfx_loader.propertyEditorNode(&property_editor, gfx_node);
     _ = try self.scene.propertyEditorNode(&property_editor, gfx_node);
+    _ = try gfx_passes.propertyEditorNode(&property_editor, gfx_node);
 
     _ = try propertyEditorNode(&property_editor);
 
-    try self.engine.windows.getPtr("main").setRelativeMouseMode(config.flags.mouse_captured);
+    const main_win = self.engine.windows.getPtr("main");
+    try main_win.setRelativeMouseMode(config.flags.mouse_captured);
 
     Zengine.sections.sub(.load).sub(.ui).end();
     allocators.scratchRelease();
@@ -266,8 +354,10 @@ fn input(self: *const Zengine) !bool {
                     c.SDLK_W => controls.set(.z_pos),
                     c.SDLK_A => controls.set(.x_neg),
                     c.SDLK_D => controls.set(.x_pos),
-                    c.SDLK_X => controls.set(.y_neg),
-                    c.SDLK_SPACE => controls.set(.y_pos),
+                    // c.SDLK_X => controls.set(.y_neg),
+                    // c.SDLK_SPACE => controls.set(.y_pos),
+                    c.SDLK_X => controls.set(.custom(Controls.firing)),
+                    c.SDLK_SPACE => controls.set(.custom(Controls.firing)),
 
                     c.SDLK_K => controls.set(.scale_neg),
                     c.SDLK_L => controls.set(.scale_pos),
@@ -303,8 +393,10 @@ fn input(self: *const Zengine) !bool {
                     c.SDLK_W => controls.clear(.z_pos),
                     c.SDLK_A => controls.clear(.x_neg),
                     c.SDLK_D => controls.clear(.x_pos),
-                    c.SDLK_X => controls.clear(.y_neg),
-                    c.SDLK_SPACE => controls.clear(.y_pos),
+                    // c.SDLK_X => controls.clear(.y_neg),
+                    // c.SDLK_SPACE => controls.clear(.y_pos),
+                    c.SDLK_X => controls.clear(.custom(Controls.firing)),
+                    c.SDLK_SPACE => controls.clear(.custom(Controls.firing)),
 
                     c.SDLK_K => controls.clear(.scale_neg),
                     c.SDLK_L => controls.clear(.scale_pos),
@@ -343,10 +435,12 @@ fn input(self: *const Zengine) !bool {
 
 fn update(self: *const Zengine) !bool {
     const delta = global.timeSinceLastFrame().toFloat().toValue32(.s);
-    switch (config.flags.camera_controls) {
-        inline else => |controls_type| updateCameraControls(self, delta, controls_type),
-    }
-    updateScene(self, delta);
+    // switch (config.flags.camera_controls) {
+    //     inline else => |controls_type| updateCameraControls(self, delta, controls_type),
+    // }
+    try updateScene(self, delta);
+    try cleanupBullets(self);
+    try self.scene.nodes.cleanupRemoved(self.scene.allocator);
 
     {
         errdefer gfx_loader.cancel();
@@ -379,72 +473,8 @@ fn render(self: *const Zengine) !void {
 
     self.ui.endDraw();
 
-    {
-        const fa = allocators.frame();
-        // self.renderer.renderScene();
-        const line_pipeline = self.renderer.pipelines.graphics.get("line");
-        const origin_mesh = self.renderer.mesh_bufs.getPtr("origin");
-        const camera = self.renderer.cameras.getPtr("default");
-        const stencil = self.renderer.textures.get("stencil");
-
-        var command_buffer = try self.renderer.gpu_device.commandBuffer();
-        errdefer command_buffer.cancel() catch unreachable;
-
-        const swapchain = try command_buffer.swapchainTexture(self.renderer.window);
-        if (!swapchain.isValid()) {
-            return;
-        }
-
-        const tr_projection = try fa.create(math.Matrix4x4);
-        const tr_view = try fa.create(math.Matrix4x4);
-        const tr_view_projection = try fa.create(math.Matrix4x4);
-
-        const win_size = self.renderer.window.pixelSize();
-        camera.projection(
-            tr_projection,
-            @floatFromInt(win_size[0]),
-            @floatFromInt(win_size[1]),
-            0.1,
-            10_000.0,
-        );
-        camera.transform(tr_view);
-        math.matrix4x4.dot(tr_view_projection, tr_projection, tr_view);
-
-        log.debug("camera_position: {any}", .{camera.position});
-        log.debug("camera_direction: {any}", .{camera.direction});
-
-        var render_pass = try command_buffer.renderPass(&.{
-            .{ .texture = swapchain, .load_op = .clear, .store_op = .store },
-        }, &.{ .texture = stencil, .clear_depth = 1, .load_op = .clear, .store_op = .store });
-
-        render_pass.bindPipeline(line_pipeline);
-        try render_pass.bindVertexBuffers(0, &.{
-            .{ .buffer = origin_mesh.gpu_bufs.get(.vertex), .offset = 0 },
-        });
-        render_pass.bindIndexBuffer(
-            &.{ .buffer = origin_mesh.gpu_bufs.get(.index), .offset = 0 },
-            .@"32bit",
-        );
-
-        const uniform_buf = try fa.alloc(f32, 32);
-        @memcpy(uniform_buf[0..16], math.matrix4x4.sliceConst(tr_view_projection));
-        @memcpy(uniform_buf[16..32], math.matrix4x4.sliceConst(&math.matrix4x4.identity));
-        command_buffer.pushUniformData(.vertex, 0, uniform_buf);
-
-        command_buffer.pushUniformData(.fragment, 0, &math.RGBAf32{ 1, 0, 0, 1 });
-        render_pass.drawIndexedPrimitives(2, 1, 0, 0, 0);
-
-        command_buffer.pushUniformData(.fragment, 0, &math.RGBAf32{ 0, 1, 0, 1 });
-        render_pass.drawIndexedPrimitives(2, 1, 2, 0, 0);
-
-        command_buffer.pushUniformData(.fragment, 0, &math.RGBAf32{ 0, 0, 1, 1 });
-        render_pass.drawIndexedPrimitives(2, 1, 4, 0, 0);
-
-        render_pass.end();
-        try command_buffer.submit();
-    }
-    // var items: gfx.Renderer.Items = .init(&flat_scene);
-    // _ = try flat_scene.render(self.ui, &items);
+    var items: gfx.render.Items = .init(&flat_scene);
+    _ = try flat_scene.render(self.ui, &items, &gfx_passes.bloom);
 }
 
 fn executeRaycast(self: *const Zengine) void {
@@ -490,9 +520,98 @@ fn executeRaycast(self: *const Zengine) void {
     }
 }
 
-fn updateScene(self: *const Zengine, delta: f32) void {
-    _ = self;
-    _ = delta;
+fn updateScene(self: *const Zengine, delta: f32) !void {
+    const fa = allocators.frame();
+    const camera = self.renderer.activeCamera();
+    const main_win = self.engine.windows.get("main");
+    var s = self.scene.nodes.slice();
+    const t_s = global.timeSinceStart().toFloat().toValue32(.s);
+    const ship = s.transform(scene_map.get("ship"));
+    const planet = s.transform(scene_map.get("planet"));
+    const bullets = scene_map.get("bullets");
+
+    planet.rotation[1] = t_s;
+    const translation_speed = 20 * delta * config.speed_scale;
+    const coords = math.Coords3{
+        .x = .{ 1, 0, 0 },
+        .y = .{ 0, 1, 0 },
+        .z = .{ 0, 0, 1 },
+    };
+    if (controls.has(.x_neg))
+        math.vector3.translateScale(&ship.translation, &coords.x, -translation_speed);
+    if (controls.has(.x_pos))
+        math.vector3.translateScale(&ship.translation, &coords.x, translation_speed);
+
+    if (controls.has(.y_neg))
+        math.vector3.translateScale(&ship.translation, &coords.y, -translation_speed);
+    if (controls.has(.y_pos))
+        math.vector3.translateScale(&ship.translation, &coords.y, translation_speed);
+
+    if (controls.has(.z_neg))
+        math.vector3.translateScale(&ship.translation, &coords.z, -translation_speed);
+    if (controls.has(.z_pos))
+        math.vector3.translateScale(&ship.translation, &coords.z, translation_speed);
+
+    if (controls.has(.custom(Controls.firing))) {
+        if (firing_timer.updated(global.sinceStart())) {
+            const bullet = try self.scene.createChildNode(bullets, "Bullet", .object("Bullet"), &.{
+                .translation = ship.translation,
+                .rotation = ship.rotation,
+            });
+            _ = bullet;
+            s = self.scene.nodes.slice();
+        }
+    }
+
+    var mouse_pos = main_win.mousePos();
+    const win_size = math.point_u32.to(f32, &main_win.logicalSize());
+    math.point_f32.div(&mouse_pos, &win_size);
+    math.point_f32.sub(&mouse_pos, &.{ 0.5, 0.5 });
+    math.point_f32.mul(&mouse_pos, &.{ 2, -2 });
+    mouse_pos[0] *= win_size[0] / win_size[1];
+
+    camera.position = .{ mouse_pos[0] * 25, 400, mouse_pos[1] * 25 };
+
+    const ship_ray = math.vector4.makeTranslatable(ship.translation);
+    var ship_proj: math.Vector4 = undefined;
+    const tr_view = try fa.create(math.Matrix4x4);
+    const tr_proj = try fa.create(math.Matrix4x4);
+    const tr_view_proj = try fa.create(math.Matrix4x4);
+
+    camera.transform(tr_view);
+    camera.projection(tr_proj, win_size[0], win_size[1], 1, 1000);
+    math.matrix4x4.dot(tr_view_proj, tr_proj, tr_view);
+    math.matrix4x4.apply(&ship_proj, tr_view_proj, &ship_ray);
+    math.vector4.scaleRecip(&ship_proj, ship_proj[3]);
+    ship_proj[0] *= win_size[0] / win_size[1];
+
+    const ship_pos: math.Vector3 = .{ 0, std.math.atan2(mouse_pos[0] - ship_proj[0], mouse_pos[1] - ship_proj[1]), 0 };
+    ship.rotation = ship_pos;
+
+    var walk = s.node(bullets).child;
+    while (walk.isValid()) : (walk = s.node(walk).next) {
+        const bullet = s.transform(walk);
+        var bullet_dir: math.Vector4 = undefined;
+        const tr_rot = math.matrix4x4.rotationEuler(&bullet.rotation, .default);
+        math.matrix4x4.apply(&bullet_dir, &tr_rot, &math.vector4.ntr_fwd);
+        const bullet_speed = 200;
+        math.vector4.scale(&bullet_dir, -delta * bullet_speed);
+        math.vector3.add(&bullet.translation, bullet_dir[0..3]);
+    }
+}
+
+fn cleanupBullets(self: *const Zengine) !void {
+    const bullets = scene_map.get("bullets");
+    const s = self.scene.nodes.slice();
+    var walk = s.node(bullets).child;
+    while (walk.isValid()) : (walk = s.node(walk).next) {
+        if (!self.scene.nodes.isPresent(walk)) continue;
+        const bullet = s.transform(walk);
+        log.info("walk {f} {any}", .{ walk, bullet.translation });
+        if (@abs(bullet.translation[0]) >= 380 or @abs(bullet.translation[2]) >= 222) {
+            try self.scene.nodes.remove(self.scene.allocator, walk);
+        }
+    }
 }
 
 fn updateCameraControls(
