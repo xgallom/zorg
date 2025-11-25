@@ -1,7 +1,9 @@
 .DS_Store
-/.zig-cache
-/zig-out
+.zig-cache
+zig-out
 /.idea/zigbrains.xml
 /imgui.ini
 *.sublime-project
 *.sublime-workspace
+*.blend
+*.blend1

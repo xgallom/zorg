@@ -97,9 +97,11 @@ const RenderPasses = struct {
 };
 
 var config: Config = .{};
+var gamepad: ?*c.SDL_Gamepad = null;
 
 var gfx_loader: gfx.Loader = undefined;
 var gfx_passes: RenderPasses = .{};
+var ui_scene: Scene = undefined;
 var flat_scene: Scene.Flattened = undefined;
 var scene_map: zengine.containers.ArrayMap(Scene.Node.Id) = .empty;
 
@@ -194,6 +196,7 @@ fn load(self: *const Zengine) !bool {
         _ = try gfx_loader.loadMesh("ship.obj");
         _ = try gfx_loader.loadMesh("small_enemy_ship.obj");
         _ = try gfx_loader.loadMesh("bullet.obj");
+        _ = try gfx_loader.loadMesh("ui.obj");
 
         try gfx_loader.createGraphicsPipelines();
         _ = try gfx_loader.createOriginMesh();
@@ -275,6 +278,11 @@ fn load(self: *const Zengine) !bool {
     const bullets = try self.scene.createRootNode("Bullets", .node(), &.{});
     try scene_map.insert(self.scene.allocator, "bullets", bullets);
 
+    const scene_ui = try self.scene.createRootNode("UI", .node(), &.{
+        .rotation = .{ 1.570, 0, 0 },
+        .scale = .{ 0.5, 1, 1 },
+    });
+    _ = try self.scene.createChildNode(scene_ui, "Dialogue Frame", .ui("UI_Dialogue_Frame"), &.{});
     Zengine.sections.sub(.load).sub(.scene).end();
     Zengine.sections.sub(.load).sub(.ui).begin();
 
@@ -340,6 +348,20 @@ fn input(self: *const Zengine) !bool {
 
         switch (event.type) {
             .quit => return false,
+            .joystick_added => {
+                log.info("added joystick: {}", .{event.sdl.jdevice.which});
+                if (gamepad != null) {
+                    c.SDL_SetGamepadEventsEnabled(true);
+                    gamepad = c.SDL_OpenGamepad(event.sdl.gdevice.which);
+                }
+            },
+            .gamepad_removed => {
+                log.info("removed gamepad: {}", .{event.sdl.gdevice.which});
+                if (gamepad != null) c.SDL_CloseGamepad(gamepad);
+            },
+            .gamepad_button_down => {
+                log.info("{}", .{event.sdl.gbutton.button});
+            },
             .key_down => {
                 if (event.sdl.key.repeat) break;
                 switch (event.sdl.key.key) {
@@ -473,8 +495,10 @@ fn render(self: *const Zengine) !void {
 
     self.ui.endDraw();
 
-    var items: gfx.render.Items = .init(&flat_scene);
-    _ = try flat_scene.render(self.ui, &items, &gfx_passes.bloom);
+    var items: gfx.render.Items.Object = .init(&flat_scene, .mesh_objs);
+    var ui_items: gfx.render.Items.Object = .init(&flat_scene, .ui_objs);
+    var text_iter: gfx.render.Items.Text = .init(&flat_scene);
+    _ = try flat_scene.render(self.ui, &items, &ui_items, &text_iter, &gfx_passes.bloom);
 }
 
 fn executeRaycast(self: *const Zengine) void {
