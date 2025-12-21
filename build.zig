@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn build(b: *std.Build) void {
+pub fn build(b: *std.Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -23,7 +23,7 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(exe);
 
     {
-        const install_shaders_dir = z.addCompileShaders(b, .{
+        const install_shaders_dir = try z.addCompileShaders(b, .{
             .b = zengine.builder,
             .module = zengine.module("zengine"),
             .options = options,
@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
         b.getInstallStep().dependOn(&install_shaders_dir.step);
     }
     {
-        const install_shaders_dir = z.addCompileShaders(b, .{
+        const install_shaders_dir = try z.addCompileShaders(b, .{
             .b = zengine.builder,
             .src = b.path("shaders"),
             .module = zengine.module("zengine"),

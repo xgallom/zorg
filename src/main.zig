@@ -100,6 +100,7 @@ var config: Config = .{};
 var gamepad: ?*c.SDL_Gamepad = null;
 
 var gfx_loader: gfx.Loader = undefined;
+var gfx_fence: gfx.GPUFence = .invalid;
 var gfx_passes: RenderPasses = .{};
 var ui_scene: Scene = undefined;
 var flat_scene: Scene.Flattened = undefined;
@@ -223,7 +224,7 @@ fn load(self: *const Zengine) !bool {
         _ = try gfx_loader.loadLights("scene.lgh");
         _ = try gfx_loader.createLightsBuffer(null);
         _ = try gfx_loader.loadLut("lut/basic.cube");
-        try gfx_loader.commit();
+        gfx_fence = try gfx_loader.commit();
     }
 
     Zengine.sections.sub(.load).sub(.gfx).end();
@@ -307,7 +308,7 @@ fn load(self: *const Zengine) !bool {
     return true;
 }
 
-fn unload(self: *const Zengine) void {
+fn unload(self: *const Zengine) !void {
     scene_map.deinit(self.scene.allocator);
     gfx_loader.deinit();
     debug_ui.deinit();
@@ -468,7 +469,11 @@ fn update(self: *const Zengine) !bool {
         errdefer gfx_loader.cancel();
         flat_scene = try self.scene.flatten();
         _ = try gfx_loader.createLightsBuffer(&flat_scene);
-        try gfx_loader.commit();
+        if (gfx_fence.isValid()) {
+            try self.renderer.gpu_device.wait(.any, &.{gfx_fence});
+            self.renderer.gpu_device.release(&gfx_fence);
+        }
+        gfx_fence = try gfx_loader.commit();
     }
 
     if (execute_raycast) executeRaycast(self);
@@ -498,7 +503,14 @@ fn render(self: *const Zengine) !void {
     var items: gfx.render.Items.Object = .init(&flat_scene, .mesh_objs);
     var ui_items: gfx.render.Items.Object = .init(&flat_scene, .ui_objs);
     var text_iter: gfx.render.Items.Text = .init(&flat_scene);
-    _ = try flat_scene.render(self.ui, &items, &ui_items, &text_iter, &gfx_passes.bloom);
+    _ = try flat_scene.render(
+        self.ui,
+        &items,
+        &ui_items,
+        &text_iter,
+        &.{gfx_passes.bloom.interface()},
+        &gfx_fence,
+    );
 }
 
 fn executeRaycast(self: *const Zengine) void {
@@ -577,7 +589,7 @@ fn updateScene(self: *const Zengine, delta: f32) !void {
         math.vector3.translateScale(&ship.translation, &coords.z, translation_speed);
 
     if (controls.has(.custom(Controls.firing))) {
-        if (firing_timer.updated(global.sinceStart())) {
+        if (firing_timer.updated(global.sinceStart(), .set)) {
             const bullet = try self.scene.createChildNode(bullets, "Bullet", .object("Bullet"), &.{
                 .translation = ship.translation,
                 .rotation = ship.rotation,
